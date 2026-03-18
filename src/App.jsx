@@ -197,77 +197,324 @@ function EarthGlobe() {
 }
 
 /* ══════════════════════════════════════
-   3D — Asteroid Belt
+   3D — JET FIRE PARTICLE SYSTEM
+   Emits from engine nozzles, flows backward (+X)
 ══════════════════════════════════════ */
-function AsteroidBelt({ count = 120, radius = 4.2 }) {
-  const group = useRef();
-  const asteroidTex = useMemo(() => makeAsteroidTexture(), []);
+function JetFire({ offset = [0, 0, 0], scale = 1 }) {
+  const ref = useRef();
+  const COUNT = 120;
 
-  const asteroids = useMemo(() => {
-    return Array.from({ length: count }, (_, i) => {
-      const angle  = (i / count) * Math.PI * 2;
-      const spread = (Math.random() - 0.5) * 1.4;
-      const r      = radius + spread;
-      const yOff   = (Math.random() - 0.5) * 0.9;
-      const scale  = Math.random() * 0.13 + 0.04;
-      const speed  = Math.random() * 0.12 + 0.04;
-      const phase  = Math.random() * Math.PI * 2;
-      const rotX   = Math.random() * Math.PI;
-      const rotZ   = Math.random() * Math.PI;
-      const detail = Math.floor(Math.random() * 2);
-      // unique scale distortion per axis for jagged look
-      const sx = 0.7 + Math.random() * 0.6;
-      const sy = 0.5 + Math.random() * 0.8;
-      const sz = 0.6 + Math.random() * 0.7;
-      return { angle, r, yOff, scale, speed, phase, rotX, rotZ, detail, sx, sy, sz };
-    });
-  }, [count, radius]);
+  const { positions, velocities, lifetimes, sizes } = useMemo(() => {
+    const positions  = new Float32Array(COUNT * 3);
+    const velocities = new Float32Array(COUNT * 3);
+    const lifetimes  = new Float32Array(COUNT);
+    const sizes      = new Float32Array(COUNT);
+    for (let i = 0; i < COUNT; i++) {
+      lifetimes[i] = Math.random();
+      sizes[i]     = Math.random() * 0.06 + 0.02;
+    }
+    return { positions, velocities, lifetimes, sizes };
+  }, []);
 
-  useFrame(({ clock }) => {
-    const t = clock.getElapsedTime();
-    if (!group.current) return;
-    group.current.children.forEach((mesh, i) => {
-      const a = asteroids[i];
-      const angle = a.phase + t * a.speed;
-      mesh.position.x = Math.cos(angle) * a.r;
-      mesh.position.z = Math.sin(angle) * a.r;
-      mesh.position.y = a.yOff;
-      mesh.rotation.x += 0.004;
-      mesh.rotation.y += 0.006;
-    });
+  // colour array: hot white core → orange → red → transparent
+  const colors = useMemo(() => {
+    const arr = new Float32Array(COUNT * 3);
+    return arr;
+  }, []);
+
+  useFrame(({ clock }, delta) => {
+    if (!ref.current) return;
+    const pos = ref.current.geometry.attributes.position.array;
+    const col = ref.current.geometry.attributes.color.array;
+    const sz  = ref.current.geometry.attributes.size.array;
+
+    for (let i = 0; i < COUNT; i++) {
+      lifetimes[i] += delta * 1.8;
+      if (lifetimes[i] > 1) {
+        // respawn at nozzle
+        lifetimes[i] = 0;
+        pos[i * 3]     = offset[0];
+        pos[i * 3 + 1] = offset[1] + (Math.random() - 0.5) * 0.04;
+        pos[i * 3 + 2] = offset[2] + (Math.random() - 0.5) * 0.04;
+        velocities[i * 3]     = (0.8 + Math.random() * 0.6) * scale;  // shoot right (+X)
+        velocities[i * 3 + 1] = (Math.random() - 0.5) * 0.08;
+        velocities[i * 3 + 2] = (Math.random() - 0.5) * 0.08;
+      }
+
+      pos[i * 3]     += velocities[i * 3]     * delta;
+      pos[i * 3 + 1] += velocities[i * 3 + 1] * delta;
+      pos[i * 3 + 2] += velocities[i * 3 + 2] * delta;
+
+      const life = lifetimes[i]; // 0→1
+      // colour: 0→0.2 white, 0.2→0.5 orange, 0.5→1 red→dark
+      if (life < 0.2) {
+        col[i*3]=1; col[i*3+1]=0.95; col[i*3+2]=0.8;  // hot white
+      } else if (life < 0.5) {
+        const t = (life - 0.2) / 0.3;
+        col[i*3]=1; col[i*3+1]=0.6-t*0.4; col[i*3+2]=0.1*(1-t); // orange
+      } else {
+        const t = (life - 0.5) / 0.5;
+        col[i*3]=1-t*0.6; col[i*3+1]=0.1*(1-t); col[i*3+2]=0; // red→dark
+      }
+      sz[i] = sizes[i] * scale * (1 - life * 0.8);
+    }
+
+    ref.current.geometry.attributes.position.needsUpdate = true;
+    ref.current.geometry.attributes.color.needsUpdate    = true;
+    ref.current.geometry.attributes.size.needsUpdate     = true;
   });
 
   return (
+    <points ref={ref}>
+      <bufferGeometry>
+        <bufferAttribute attach="attributes-position" args={[positions, 3]} />
+        <bufferAttribute attach="attributes-color"    args={[colors, 3]} />
+        <bufferAttribute attach="attributes-size"     args={[new Float32Array(COUNT), 1]} />
+      </bufferGeometry>
+      <pointsMaterial
+        vertexColors size={0.08 * scale} sizeAttenuation
+        transparent opacity={0.9} depthWrite={false}
+        blending={THREE.AdditiveBlending}
+      />
+    </points>
+  );
+}
+
+/* ══════════════════════════════════════
+   3D — HEAVY CRUISER SPACESHIP
+   Wide saucer hull + swept delta wings + quad nacelles + bridge tower
+   Travels right → left, enters from deep z toward camera
+══════════════════════════════════════ */
+function Spaceship({ lane = 0, speed = 1, delay = 0 }) {
+  const group = useRef();
+  const M = { color: "#c8c8c8", metalness: 0.95, roughness: 0.12 };
+  const MD = { color: "#888", metalness: 1, roughness: 0.08 };
+  const DARK = { color: "#444", metalness: 0.9, roughness: 0.2 };
+
+  const path = useMemo(() => ({
+    startX:  20, endX: -20,
+    startZ: -12 + lane * 3, endZ: 4 + lane * 1.5,
+    y: (lane - 1) * 1.8,
+    tilt: -0.15 + lane * 0.05,
+  }), [lane]);
+
+  useFrame(({ clock }) => {
+    if (!group.current) return;
+    const t = clock.getElapsedTime();
+    const cyc = 16 / speed;
+    const raw = ((t + delay) % cyc) / cyc;
+    const p = raw < 0.5 ? 2 * raw * raw : 1 - Math.pow(-2 * raw + 2, 2) / 2;
+    group.current.position.x = path.startX + (path.endX - path.startX) * p;
+    group.current.position.z = path.startZ + (path.endZ - path.startZ) * p;
+    group.current.position.y = path.y + Math.sin(t * 0.5 + delay) * 0.1;
+    group.current.rotation.y = -Math.PI / 2 + Math.sin(t * 0.25 + delay) * 0.03;
+    group.current.rotation.z = path.tilt + Math.sin(t * 0.4 + delay) * 0.025;
+  });
+
+  // nozzle positions for 4 engines
+  const nozzles = [[-0.55, 0.08, 0.28], [-0.55, 0.08, -0.28], [-0.55, -0.08, 0.18], [-0.55, -0.08, -0.18]];
+
+  return (
     <group ref={group}>
-      {asteroids.map((a, i) => (
-        <mesh key={i} scale={[a.scale * a.sx, a.scale * a.sy, a.scale * a.sz]} rotation={[a.rotX, 0, a.rotZ]}>
-          <dodecahedronGeometry args={[1, a.detail]} />
-          <meshStandardMaterial
-            map={asteroidTex}
-            roughness={0.95}
-            metalness={0.08}
-          />
-        </mesh>
+      {/* ── Primary saucer hull (wide flat ellipsoid via scaled sphere) ── */}
+      <mesh scale={[1.1, 0.18, 0.72]}>
+        <sphereGeometry args={[0.55, 32, 16]} />
+        <meshStandardMaterial {...M} />
+      </mesh>
+
+      {/* ── Upper hull ridge (spine) ── */}
+      <mesh position={[0, 0.07, 0]} scale={[1, 0.5, 0.3]}>
+        <sphereGeometry args={[0.38, 20, 10]} />
+        <meshStandardMaterial {...M} />
+      </mesh>
+
+      {/* ── Bridge tower ── */}
+      <mesh position={[0.12, 0.16, 0]}>
+        <boxGeometry args={[0.18, 0.1, 0.14]} />
+        <meshStandardMaterial {...M} />
+      </mesh>
+      {/* bridge viewport strip */}
+      <mesh position={[0.18, 0.17, 0]}>
+        <boxGeometry args={[0.06, 0.04, 0.12]} />
+        <meshStandardMaterial color="#88ccff" emissive="#2255aa" emissiveIntensity={1.2}
+          transparent opacity={0.85} roughness={0} metalness={0.1} />
+      </mesh>
+
+      {/* ── Nose prow (elongated forward) ── */}
+      <mesh position={[0.62, 0, 0]} rotation={[0, 0, -Math.PI / 2]}>
+        <coneGeometry args={[0.09, 0.55, 12]} />
+        <meshStandardMaterial {...M} />
+      </mesh>
+      {/* prow underside keel */}
+      <mesh position={[0.45, -0.06, 0]} rotation={[0, 0, -Math.PI / 2]}>
+        <coneGeometry args={[0.04, 0.3, 8]} />
+        <meshStandardMaterial {...MD} />
+      </mesh>
+
+      {/* ── Swept delta wings (port & starboard) ── */}
+      {/* main wing panels — tapered box swept back */}
+      <mesh position={[-0.05, -0.02, 0.52]} rotation={[0, -0.38, 0.06]}>
+        <boxGeometry args={[0.72, 0.025, 0.38]} />
+        <meshStandardMaterial {...M} />
+      </mesh>
+      <mesh position={[-0.05, -0.02, -0.52]} rotation={[0, 0.38, -0.06]}>
+        <boxGeometry args={[0.72, 0.025, 0.38]} />
+        <meshStandardMaterial {...M} />
+      </mesh>
+      {/* wing tip fins */}
+      <mesh position={[-0.28, 0.04, 0.78]} rotation={[0, -0.5, 0.35]}>
+        <boxGeometry args={[0.22, 0.12, 0.018]} />
+        <meshStandardMaterial {...MD} />
+      </mesh>
+      <mesh position={[-0.28, 0.04, -0.78]} rotation={[0, 0.5, -0.35]}>
+        <boxGeometry args={[0.22, 0.12, 0.018]} />
+        <meshStandardMaterial {...MD} />
+      </mesh>
+
+      {/* ── Ventral strakes (under-hull detail) ── */}
+      <mesh position={[0.1, -0.1, 0.18]}>
+        <boxGeometry args={[0.5, 0.018, 0.06]} />
+        <meshStandardMaterial {...DARK} />
+      </mesh>
+      <mesh position={[0.1, -0.1, -0.18]}>
+        <boxGeometry args={[0.5, 0.018, 0.06]} />
+        <meshStandardMaterial {...DARK} />
+      </mesh>
+
+      {/* ── Hull panel lines (surface detail boxes) ── */}
+      <mesh position={[0.25, 0.1, 0.12]}>
+        <boxGeometry args={[0.28, 0.008, 0.08]} />
+        <meshStandardMaterial {...DARK} />
+      </mesh>
+      <mesh position={[0.25, 0.1, -0.12]}>
+        <boxGeometry args={[0.28, 0.008, 0.08]} />
+        <meshStandardMaterial {...DARK} />
+      </mesh>
+      <mesh position={[-0.1, 0.1, 0]}>
+        <boxGeometry args={[0.18, 0.008, 0.22]} />
+        <meshStandardMaterial {...DARK} />
+      </mesh>
+
+      {/* ── Sensor/antenna array (top) ── */}
+      <mesh position={[0.3, 0.24, 0]} rotation={[0, 0, 0.15]}>
+        <cylinderGeometry args={[0.005, 0.005, 0.14, 4]} />
+        <meshStandardMaterial color="#ffffff" emissive="#ffffff" emissiveIntensity={0.5} />
+      </mesh>
+      <mesh position={[0.3, 0.31, 0]}>
+        <sphereGeometry args={[0.012, 6, 6]} />
+        <meshStandardMaterial color="#ff4400" emissive="#ff4400" emissiveIntensity={4}
+          transparent opacity={0.9} blending={THREE.AdditiveBlending} depthWrite={false} />
+      </mesh>
+
+      {/* ── Upper nacelle pylons ── */}
+      <mesh position={[-0.22, 0.04, 0.28]} rotation={[0, 0, Math.PI / 2]}>
+        <cylinderGeometry args={[0.018, 0.025, 0.12, 6]} />
+        <meshStandardMaterial {...MD} />
+      </mesh>
+      <mesh position={[-0.22, 0.04, -0.28]} rotation={[0, 0, Math.PI / 2]}>
+        <cylinderGeometry args={[0.018, 0.025, 0.12, 6]} />
+        <meshStandardMaterial {...MD} />
+      </mesh>
+
+      {/* ── 4 engine nacelles ── */}
+      {nozzles.map(([nx, ny, nz], i) => (
+        <group key={i}>
+          {/* nacelle body */}
+          <mesh position={[nx + 0.12, ny, nz]} rotation={[0, 0, Math.PI / 2]}>
+            <cylinderGeometry args={[0.038, 0.055, 0.38, 10]} />
+            <meshStandardMaterial {...MD} />
+          </mesh>
+          {/* nacelle intake ring */}
+          <mesh position={[nx + 0.31, ny, nz]}>
+            <torusGeometry args={[0.055, 0.01, 8, 18]} />
+            <meshStandardMaterial {...DARK} />
+          </mesh>
+          {/* nozzle bell */}
+          <mesh position={[nx, ny, nz]} rotation={[0, 0, Math.PI / 2]}>
+            <cylinderGeometry args={[0.042, 0.032, 0.06, 10]} />
+            <meshStandardMaterial color="#333" metalness={1} roughness={0.05} />
+          </mesh>
+          {/* engine glow ring */}
+          <mesh position={[nx - 0.01, ny, nz]}>
+            <torusGeometry args={[0.036, 0.009, 8, 20]} />
+            <meshStandardMaterial color="#ff6600" emissive="#ff4400" emissiveIntensity={4}
+              transparent opacity={0.95} blending={THREE.AdditiveBlending} depthWrite={false} />
+          </mesh>
+          {/* inner core glow */}
+          <mesh position={[nx - 0.01, ny, nz]}>
+            <circleGeometry args={[0.028, 12]} />
+            <meshStandardMaterial color="#ffaa00" emissive="#ff8800" emissiveIntensity={5}
+              transparent opacity={0.7} blending={THREE.AdditiveBlending} depthWrite={false}
+              side={THREE.DoubleSide} />
+          </mesh>
+          <JetFire offset={[nx, ny, nz]} scale={1.4} />
+          <pointLight position={[nx, ny, nz]} intensity={1.5} color="#ff5500" distance={0.9} />
+        </group>
       ))}
+
+      {/* ── Weapon hardpoints on wings ── */}
+      <mesh position={[0.08, -0.04, 0.62]} rotation={[0, 0, Math.PI / 2]}>
+        <cylinderGeometry args={[0.012, 0.012, 0.22, 6]} />
+        <meshStandardMaterial color="#555" metalness={0.9} roughness={0.2} />
+      </mesh>
+      <mesh position={[0.08, -0.04, -0.62]} rotation={[0, 0, Math.PI / 2]}>
+        <cylinderGeometry args={[0.012, 0.012, 0.22, 6]} />
+        <meshStandardMaterial color="#555" metalness={0.9} roughness={0.2} />
+      </mesh>
     </group>
   );
 }
 
 /* ══════════════════════════════════════
-   3D — Asteroid Belt Ring (orbital plane)
+   3D — FREE-FLYING ASTEROIDS
+   Travel right→left at varying depths, tumbling as they go
 ══════════════════════════════════════ */
-function BeltRing() {
+function FlyingAsteroids({ count = 14 }) {
+  const group = useRef();
+  const asteroidTex = useMemo(() => makeAsteroidTexture(), []);
+
+  const rocks = useMemo(() => Array.from({ length: count }, (_, i) => ({
+    speed:  0.4 + Math.random() * 0.9,
+    delay:  Math.random() * 20,
+    y:      (Math.random() - 0.5) * 8,
+    z:      -10 + Math.random() * 14,     // spread across depth
+    scale:  0.06 + Math.random() * 0.22,
+    sx:     0.6 + Math.random() * 0.8,
+    sy:     0.5 + Math.random() * 0.9,
+    sz:     0.6 + Math.random() * 0.8,
+    rotSpeedX: (Math.random() - 0.5) * 0.8,
+    rotSpeedY: (Math.random() - 0.5) * 0.6,
+    rotSpeedZ: (Math.random() - 0.5) * 0.5,
+    detail: Math.floor(Math.random() * 2),
+  })), [count]);
+
+  useFrame(({ clock }, delta) => {
+    if (!group.current) return;
+    const t = clock.getElapsedTime();
+    group.current.children.forEach((mesh, i) => {
+      const r = rocks[i];
+      const cyc = 28 / r.speed;
+      const raw = ((t + r.delay) % cyc) / cyc;
+      // right to left: x goes from +16 to -16
+      mesh.position.x = 16 - raw * 32;
+      mesh.position.y = r.y + Math.sin(t * 0.3 + i) * 0.15;
+      mesh.position.z = r.z;
+      // tumble
+      mesh.rotation.x += r.rotSpeedX * delta;
+      mesh.rotation.y += r.rotSpeedY * delta;
+      mesh.rotation.z += r.rotSpeedZ * delta;
+    });
+  });
+
   return (
-    <mesh rotation={[Math.PI / 2, 0, 0]}>
-      <torusGeometry args={[4.2, 0.55, 2, 180]} />
-      <meshStandardMaterial
-        color="#ffffff"
-        transparent
-        opacity={0.018}
-        depthWrite={false}
-        side={THREE.DoubleSide}
-      />
-    </mesh>
+    <group ref={group}>
+      {rocks.map((r, i) => (
+        <mesh key={i} scale={[r.scale * r.sx, r.scale * r.sy, r.scale * r.sz]}>
+          <dodecahedronGeometry args={[1, r.detail]} />
+          <meshStandardMaterial map={asteroidTex} roughness={0.95} metalness={0.08} />
+        </mesh>
+      ))}
+    </group>
   );
 }
 
@@ -295,27 +542,83 @@ function Moon() {
 }
 
 /* ══════════════════════════════════════
-   3D — Satellites (3 orbital planes)
+   3D — REALISTIC SATELLITE
+   Box body + solar panel wings + dish antenna + trail
 ══════════════════════════════════════ */
-function Satellite({ rx = 0, ry = 0, rz = 0, orbitR = 3.0, speed = 0.55, phase = 0, color = "#ffffff" }) {
-  const ref = useRef();
+function Satellite({ rx = 0, orbitR = 3.0, speed = 0.55, phase = 0, color = "#ffffff" }) {
+  const groupRef = useRef();
+  const bodyRef  = useRef();
+
   useFrame(({ clock }) => {
     const t = clock.getElapsedTime();
     const angle = phase + t * speed;
-    if (ref.current) {
-      // rotate orbit plane
+    if (groupRef.current) {
       const x = Math.cos(angle) * orbitR;
       const y = Math.sin(angle) * orbitR * Math.sin(rx);
       const z = Math.sin(angle) * orbitR * Math.cos(rx);
-      ref.current.position.set(x, y, z);
+      groupRef.current.position.set(x, y, z);
+      // face direction of travel
+      groupRef.current.rotation.y = angle + Math.PI / 2;
     }
+    // slow body tumble
+    if (bodyRef.current) bodyRef.current.rotation.x += 0.004;
   });
+
   return (
-    <Trail width={0.4} length={12} color={color} attenuation={(t) => t * t}>
-      <mesh ref={ref}>
-        <sphereGeometry args={[0.05, 10, 10]} />
-        <meshStandardMaterial color={color} emissive={color} emissiveIntensity={4} />
-      </mesh>
+    <Trail width={0.35} length={14} color={color} attenuation={(t) => t * t}>
+      <group ref={groupRef}>
+        <group ref={bodyRef}>
+          {/* ── Main body box ── */}
+          <mesh>
+            <boxGeometry args={[0.09, 0.07, 0.07]} />
+            <meshStandardMaterial color="#aaaaaa" metalness={0.9} roughness={0.15} />
+          </mesh>
+
+          {/* ── Solar panel wings (port & starboard) ── */}
+          {[-1, 1].map((side, i) => (
+            <group key={i} position={[0, 0, side * 0.14]}>
+              {/* panel frame */}
+              <mesh>
+                <boxGeometry args={[0.07, 0.005, 0.1]} />
+                <meshStandardMaterial color="#1a1a2e" metalness={0.3} roughness={0.6} />
+              </mesh>
+              {/* solar cells — dark blue tinted */}
+              <mesh position={[0, 0.003, 0]}>
+                <boxGeometry args={[0.065, 0.002, 0.095]} />
+                <meshStandardMaterial color="#0a0a30" emissive="#0022aa"
+                  emissiveIntensity={0.4} metalness={0.1} roughness={0.4} />
+              </mesh>
+              {/* cell grid lines */}
+              {[-0.02, 0, 0.02].map((ox, j) => (
+                <mesh key={j} position={[ox, 0.005, 0]}>
+                  <boxGeometry args={[0.003, 0.003, 0.09]} />
+                  <meshStandardMaterial color="#333366" />
+                </mesh>
+              ))}
+            </group>
+          ))}
+
+          {/* ── Dish antenna ── */}
+          <mesh position={[0.06, 0.07, 0]} rotation={[Math.PI / 2, 0, 0]}>
+            <coneGeometry args={[0.04, 0.025, 12, 1, true]} />
+            <meshStandardMaterial color="#cccccc" metalness={0.8} roughness={0.2}
+              side={THREE.DoubleSide} />
+          </mesh>
+          {/* dish stem */}
+          <mesh position={[0.06, 0.055, 0]}>
+            <cylinderGeometry args={[0.004, 0.004, 0.03, 5]} />
+            <meshStandardMaterial color="#888" metalness={0.9} roughness={0.1} />
+          </mesh>
+
+          {/* ── Status beacon light ── */}
+          <mesh position={[-0.05, 0.04, 0]}>
+            <sphereGeometry args={[0.008, 6, 6]} />
+            <meshStandardMaterial color={color} emissive={color} emissiveIntensity={6}
+              transparent opacity={0.9} blending={THREE.AdditiveBlending} depthWrite={false} />
+          </mesh>
+          <pointLight position={[-0.05, 0.04, 0]} intensity={0.4} color={color} distance={0.5} />
+        </group>
+      </group>
     </Trail>
   );
 }
@@ -416,11 +719,20 @@ function HeroScene({ scrollProgress }) {
       <Particles />
       <Suspense fallback={null}><EarthGlobe /></Suspense>
       <Moon />
-      <AsteroidBelt />
-      <BeltRing />
-      <Satellite rx={0.4}  orbitR={3.0} speed={0.55} phase={0}           color="#ffffff" />
-      <Satellite rx={1.1}  orbitR={3.3} speed={0.38} phase={Math.PI}     color="#dddddd" />
-      <Satellite rx={-0.7} orbitR={2.8} speed={0.72} phase={Math.PI / 2} color="#ffffff" />
+
+      {/* 3 spaceships on different lanes, speeds, delays */}
+      <Spaceship lane={0} speed={1.0} delay={0}  />
+      <Spaceship lane={1} speed={0.7} delay={5}  />
+      <Spaceship lane={2} speed={1.3} delay={9}  />
+
+      {/* Free-flying asteroids right→left at varying depths */}
+      <FlyingAsteroids count={14} />
+
+      <Satellite rx={0.4}  orbitR={3.0} speed={0.55} phase={0}               color="#ffffff" />
+      <Satellite rx={1.1}  orbitR={3.3} speed={0.38} phase={Math.PI}         color="#dddddd" />
+      <Satellite rx={-0.7} orbitR={2.8} speed={0.72} phase={Math.PI / 2}     color="#ffffff" />
+      <Satellite rx={0.9}  orbitR={3.6} speed={0.28} phase={Math.PI * 1.5}   color="#eeeeee" />
+      <Satellite rx={-1.3} orbitR={3.1} speed={0.61} phase={Math.PI * 0.75}  color="#ffffff" />
       <ShootingStars count={7} />
       <SunGlow />
       <CameraRig scrollProgress={scrollProgress} />
